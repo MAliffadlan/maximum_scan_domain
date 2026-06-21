@@ -38,8 +38,11 @@ from modules.wayback import run_wayback
 from modules.related import run_related
 from modules.exposed import run_exposed
 from modules.shodan import run_external_intel
+from modules.session import configure as configure_session
+from modules.nuclei import run_nuclei, is_available as nuclei_available
+from modules.spinner import Spinner
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 
 def resolve_domain(domain: str) -> tuple[str, list[str]]:
@@ -82,6 +85,16 @@ Examples:
                         help="Brute-force subdomains: 100, 500, or 1000")
     parser.add_argument("--timeout", type=int, default=120, metavar="SECONDS",
                         help="Overall timeout in seconds (default: 120)")
+    parser.add_argument("--proxy", metavar="URL",
+                        help="Proxy for all requests (e.g. http://127.0.0.1:8080)")
+    parser.add_argument("--proxy-list", metavar="FILE",
+                        help="File with proxies (one per line) — auto-rotate")
+    parser.add_argument("--delay", type=int, default=0, metavar="MS",
+                        help="Delay between requests in milliseconds (default: 0)")
+    parser.add_argument("--random-agent", action="store_true",
+                        help="Rotate User-Agent per request to evade WAF")
+    parser.add_argument("--nuclei", action="store_true",
+                        help="Run Nuclei vulnerability scanner on discovered subdomains")
     parser.add_argument("-v", "--version", action="version",
                         version=f"Domain Probe v{VERSION}")
     return parser
@@ -461,7 +474,9 @@ def display_results(results: dict[str, Any]) -> None:
         if wildcard_detected:
             wc_ips = subs.get("wildcard_ips", [])
             wildcard_note = f"  ⚠ Wildcard DNS: {', '.join(wc_ips)}"
-        print_key_value({"Count": str(len(sub_list)), "Source": subs.get("source", "unknown")})
+        src = subs.get("source", "")
+        src_label = f" (sources: {src})" if src else ""
+        print_key_value({"Count": str(len(sub_list)), "Source": src or "none"})
         if wildcard_note:
             print_warning(wildcard_note)
         if sub_list:
@@ -571,11 +586,25 @@ def main() -> None:
     args = parser.parse_args()
     domain = args.domain.strip()
 
-    # --full implies --deep + 500 subdomain brute
+    # --full implies --deep + 500 subdomain brute + anti-block defaults
     if args.full:
         args.deep = True
         if args.subdomains == 0:
             args.subdomains = 500
+        # Auto-enable anti-block unless user explicitly set values
+        # Anti-block: moderate delay for HTTP, DNS uses its own batch delay
+        if args.delay == 0:
+            args.delay = 100
+        if not args.random_agent:
+            args.random_agent = True
+
+    # Re-configure session with potentially updated values
+    configure_session(
+        proxy=args.proxy,
+        proxy_file=args.proxy_list,
+        delay=args.delay,
+        random_agent=args.random_agent,
+    )
 
     if not args.quiet:
         print_banner(domain)
@@ -606,8 +635,13 @@ def main() -> None:
             modules_list += ", Email Sec, Wayback, Related, Exposed, External Intel"
         print(f"  Running {modules_list} in parallel...\n")
 
+    spinner = Spinner("Modules scanning...", quiet=args.quiet)
+    spinner.__enter__()
     start = time.time()
-    results = run_all_modules(domain, ip, ips, nameservers, args)
+    try:
+        results = run_all_modules(domain, ip, ips, nameservers, args)
+    finally:
+        spinner.__exit__(None, None, None)
     elapsed = time.time() - start
     results["elapsed_seconds"] = round(elapsed, 2)
 
@@ -619,6 +653,99 @@ def main() -> None:
         display_results(results)
     elif not args.output:
         print(json.dumps(results, indent=2, default=str))
+
+    # ── Nuclei vulnerability scan ─────────────────────────────────────
+    if args.nuclei:
+        subdomains = results.get("subdomains", {}).get("subdomains", [])
+        if subdomains:
+            if not args.quiet:
+                print()
+                print_section("Nuclei Vulnerability Scan")
+
+            # Extract detected tech names for tag-based template filtering
+            http_data = results.get("http", {})
+            tech_tags = set()
+            tech_map = {
+                "wordpress": "wordpress", "drupal": "drupal", "joomla": "joomla",
+                "nginx": "nginx", "apache": "apache", "iis": "microsoft-iis",
+                "php": "php", "laravel": "laravel", "django": "django",
+                "cloudflare": "cloudflare", "next.js": "nextjs",
+                "node.js": "nodejs", "python": "python",
+                "magento": "magento", "shopify": "shopify",
+                "waf": "waf", "cdn": "cloudflare",
+            }
+            for t in http_data.get("tech_stack_detailed", []):
+                name = t.get("name", "").lower()
+                for key, tag in tech_map.items():
+                    if key in name:
+                        tech_tags.add(tag)
+            for t in http_data.get("wappalyzer", []):
+                name = t.get("name", "").lower()
+                for key, tag in tech_map.items():
+                    if key in name:
+                        tech_tags.add(tag)
+
+            tag_list = sorted(tech_tags) if tech_tags else None
+            tag_info = f" (tags: {', '.join(tag_list)})" if tag_list else " (all templates)"
+
+            if not args.quiet:
+                print(f"  Scanning {len(subdomains)} subdomains{tag_info}...\n")
+
+            nuc_start = time.time()
+            nuc_spinner = Spinner("Nuclei scanning...", quiet=args.quiet)
+            nuc_spinner.__enter__()
+            try:
+                nuc_results = run_nuclei(
+                    subdomains,
+                    concurrency=30,
+                    timeout=90,
+                    severity="high,critical",
+                    tech_tags=tag_list,
+                )
+            finally:
+                nuc_spinner.__exit__(None, None, None)
+            nuc_elapsed = time.time() - nuc_start
+
+            if nuc_results:
+                # Severity emoji
+                sev_icon = {
+                    "critical": "🔴",
+                    "high": "🟠",
+                    "medium": "🟡",
+                    "low": "🔵",
+                    "info": "⚪",
+                    "unknown": "⚪",
+                }
+
+                for f in nuc_results:
+                    icon = sev_icon.get(f["severity"], "⚪")
+                    print(f"  {icon} [{f['severity'].upper():>8}] {f['name']}")
+                    print(f"{'':>6}{f['url']}")
+                    print(f"{'':>6}Template: {f['template']}")
+                    if f.get("extracted"):
+                        for ex in f["extracted"][:3]:
+                            print(f"{'':>6}  → {ex}")
+                    print()
+
+                # Count by severity
+                counts = {}
+                for f in nuc_results:
+                    s = f["severity"]
+                    counts[s] = counts.get(s, 0) + 1
+
+                summary = ", ".join(
+                    f"{sev_icon.get(s, '')} {s}: {c}" for s, c in counts.items()
+                )
+                print(f"  Total: {len(nuc_results)} findings ({summary})")
+            else:
+                print(f"  ✅ No vulnerabilities found ({nuc_elapsed:.1f}s)")
+
+            results["nuclei_findings"] = len(nuc_results) if nuc_results else 0
+            results["nuclei_results"] = nuc_results or []
+        elif not args.quiet:
+            print()
+            print_section("Nuclei Vulnerability Scan")
+            print("  ⚠ No subdomains found to scan.")
 
 
 if __name__ == "__main__":

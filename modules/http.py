@@ -9,6 +9,7 @@ import re
 import requests
 from urllib.parse import urljoin
 
+from modules.session import request as http_request
 from modules.tech_detect import detect_tech as detect_tech_signatures
 from modules.wappalyzer import run_webanalyze
 
@@ -490,7 +491,7 @@ def run_http(domain: str) -> dict:
     for scheme in schemes:
         url = f"{scheme}://{domain}"
         try:
-            response = requests.get(
+            response = http_request(
                 url,
                 timeout=TIMEOUT,
                 allow_redirects=True,
@@ -555,7 +556,7 @@ def run_http(domain: str) -> dict:
     fake_origin = "https://attacker.invalid"
     cors_headers: dict[str, str] = {}
     try:
-        cors_resp = requests.get(
+        cors_resp = http_request(
             response.url,
             timeout=TIMEOUT,
             allow_redirects=False,

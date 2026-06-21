@@ -16,6 +16,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+from modules.session import request as http_request
+from modules.session import enforce_rate_limit
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -99,7 +102,8 @@ def _check_path(
     url = f"{scheme}://{domain}{path}"
 
     try:
-        response = requests.get(
+        enforce_rate_limit()  # Anti-block: delay between probes
+        response = http_request(
             url,
             timeout=TIMEOUT,
             allow_redirects=True,
