@@ -6,6 +6,8 @@ discovered subdomains via crt.sh (passive) and optionally DNS brute-force.
 """
 
 import re
+import secrets
+import string
 import sys
 
 import dns.resolver
@@ -96,29 +98,75 @@ TOP_500_SUBDOMAINS = [
 ]
 
 
-def _brute_subdomain(domain: str, prefix: str):
+# ── Wildcard detection ────────────────────────────────────────────────────
+
+def _detect_wildcard(domain: str, samples: int = 3) -> set[str]:
+    """Attempt to detect wildcard DNS for *domain*.
+
+    Resolves *samples* random, nonexistent subdomains and collects the IPs
+    returned.  If ALL random subdomains resolve, wildcard DNS is presumed
+    active and the collected IPs are returned as the set of wildcard IPs.
+
+    Returns an empty set when no wildcard is detected.
+    """
+    wildcard_ips: set[str] = set()
+    resolved_count = 0
+
+    for _ in range(samples):
+        rand = ''.join(secrets.choice(string.ascii_lowercase) for _ in range(10))
+        fqdn = f"{rand}.{domain}"
+        try:
+            answer = dns.resolver.resolve(fqdn, "A", lifetime=3)
+            resolved_count += 1
+            for rr in answer:
+                wildcard_ips.add(str(rr))
+        except Exception:
+            pass  # NXDOMAIN → no wildcard for this test
+
+    # Wildcard is active only when ALL samples resolved
+    if resolved_count < samples:
+        return set()
+
+    return wildcard_ips
+
+
+def _brute_subdomain(domain: str, prefix: str, wildcard_ips: set[str] | None = None):
     """Attempt to resolve <prefix>.<domain>.  Returns the FQDN string if any
-    A, AAAA, or CNAME record is found; otherwise returns None."""
+    A, AAAA, or CNAME record is found and the address is NOT a wildcard IP;
+    otherwise returns None."""
     fqdn = f"{prefix}.{domain}"
+
+    # Try A record
     try:
-        dns.resolver.resolve(fqdn, "A", lifetime=_DNS_TIMEOUT)
+        answer = dns.resolver.resolve(fqdn, "A", lifetime=_DNS_TIMEOUT)
+        ip = str(answer[0])
+        if wildcard_ips and ip in wildcard_ips:
+            return None  # false positive – matches wildcard IP
         return fqdn
     except Exception:
         pass
+
+    # Try AAAA record
     try:
-        dns.resolver.resolve(fqdn, "AAAA", lifetime=_DNS_TIMEOUT)
+        answer = dns.resolver.resolve(fqdn, "AAAA", lifetime=_DNS_TIMEOUT)
+        ip = str(answer[0])
+        if wildcard_ips and ip in wildcard_ips:
+            return None  # false positive – matches wildcard IP
         return fqdn
     except Exception:
         pass
+
+    # Try CNAME record (no IP to check – accept if resolved)
     try:
         dns.resolver.resolve(fqdn, "CNAME", lifetime=_DNS_TIMEOUT)
         return fqdn
     except Exception:
         pass
+
     return None
 
 
-def _brute_subdomains(domain: str, count: int):
+def _brute_subdomains(domain: str, count: int, wildcard_ips: set[str] | None = None):
     """Brute-force the first `count` entries from TOP_500_SUBDOMAINS.
 
     Returns a sorted list of resolved FQDNs."""
@@ -127,7 +175,7 @@ def _brute_subdomains(domain: str, count: int):
 
     found = []
     for prefix in candidates:
-        result = _brute_subdomain(domain, prefix)
+        result = _brute_subdomain(domain, prefix, wildcard_ips)
         if result:
             found.append(result)
 
@@ -174,8 +222,12 @@ def run_subdomains(domain, brute_count=0):
     source = "crt.sh"
 
     # ── Active brute-force phase ─────────────────────────────────────────
+    wildcard_ips: set[str] = set()
     if brute_count > 0:
-        brute_results = _brute_subdomains(domain, brute_count)
+        # Detect wildcard DNS *before* brute-force to filter false positives
+        wildcard_ips = _detect_wildcard(domain)
+
+        brute_results = _brute_subdomains(domain, brute_count, wildcard_ips)
         # Merge with passive results.
         for fqdn in brute_results:
             if fqdn not in subdomains:  # subdomains is a sorted list
@@ -187,4 +239,6 @@ def run_subdomains(domain, brute_count=0):
         "subdomains": subdomains,
         "source": source,
         "count": len(subdomains),
+        "wildcard_detected": len(wildcard_ips) > 0,
+        "wildcard_ips": sorted(wildcard_ips) if wildcard_ips else [],
     }

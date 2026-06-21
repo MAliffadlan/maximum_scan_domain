@@ -9,6 +9,9 @@ import re
 import requests
 from urllib.parse import urljoin
 
+from modules.tech_detect import detect_tech as detect_tech_signatures
+from modules.wappalyzer import run_webanalyze
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -114,9 +117,10 @@ def _parse_cookies(response, target_domain: str = ""):
             if kl == "httponly":
                 info["httpOnly"] = True
             elif kl == "samesite":
-                info["sameSite"] = val.strip() if val else None
+                info["sameSite"] = str(val).strip() if val is not None else None
             elif kl == "domain":
-                info["domain"] = val.strip().lstrip(".").lower() if val else None
+                val_str = str(val).strip() if val is not None else ""
+                info["domain"] = val_str.lstrip(".").lower() if val_str else None
             elif kl in ("expires", "max-age"):
                 info["session"] = False
 
@@ -529,6 +533,15 @@ def run_http(domain: str) -> dict:
 
     # --- Tech stack --------------------------------------------------------
     tech_stack = _detect_tech(headers, cookies, response.url)
+    # Enhanced signature-based detection
+    tech_stack_detailed = detect_tech_signatures(
+        url=response.url,
+        headers=headers,
+        cookies=cookies,
+        body=response.text,
+    )
+    # Wappalyzer integration (3965+ apps via webanalyze binary)
+    wappalyzer_results = run_webanalyze(response.url)
 
     # --- Redirect chain ----------------------------------------------------
     redirect_chain = _build_redirect_chain(response)
@@ -569,6 +582,8 @@ def run_http(domain: str) -> dict:
         "cookies":          cookies,
         "cookie_summary":   cookie_summary,
         "tech_stack":       tech_stack,
+        "tech_stack_detailed": tech_stack_detailed,
+        "wappalyzer":       wappalyzer_results,
         "missing_headers":  missing,
         "cors":             cors,
         "js_dependencies":  js_dependencies,

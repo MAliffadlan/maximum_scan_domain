@@ -39,7 +39,7 @@ from modules.related import run_related
 from modules.exposed import run_exposed
 from modules.shodan import run_external_intel
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def resolve_domain(domain: str) -> tuple[str, list[str]]:
@@ -329,9 +329,23 @@ def display_results(results: dict[str, Any]) -> None:
                         [[str(i+1), r["url"],
                           str(r.get("status_code", r.get("status", "")))]
                          for i, r in enumerate(http_data["redirect_chain"])])
-        if http_data.get("tech_stack"):
+        if http_data.get("tech_stack_detailed"):
+            det = http_data["tech_stack_detailed"]
+            print_table("Detected Technologies (Signature)", ["Category", "Technology", "Version", "Confidence"],
+                        [[d["category"], d["name"],
+                          d.get("version") or "—",
+                          d.get("confidence", "?")] for d in det])
+        elif http_data.get("tech_stack"):
             print_table("Detected Technologies", ["Technology"],
                         [[t] for t in http_data["tech_stack"]])
+
+        # Wappalyzer results (3965+ apps)
+        wapp = http_data.get("wappalyzer", [])
+        if wapp:
+            print_table("Detected Technologies (Wappalyzer — 3965 apps)",
+                        ["Category", "Technology", "Version"],
+                        [[d["category"], d["name"],
+                          d.get("version") or "—"] for d in wapp])
 
         # Security headers
         sec = http_data.get("security_headers", {})
@@ -442,7 +456,14 @@ def display_results(results: dict[str, Any]) -> None:
         print_warning(f"Subdomains: {subs['error']}")
     else:
         sub_list = subs.get("subdomains", [])
+        wildcard_detected = subs.get("wildcard_detected", False)
+        wildcard_note = ""
+        if wildcard_detected:
+            wc_ips = subs.get("wildcard_ips", [])
+            wildcard_note = f"  ⚠ Wildcard DNS: {', '.join(wc_ips)}"
         print_key_value({"Count": str(len(sub_list)), "Source": subs.get("source", "unknown")})
+        if wildcard_note:
+            print_warning(wildcard_note)
         if sub_list:
             print_table("Subdomains", ["Subdomain"], [[s] for s in sub_list[:50]])
             if len(sub_list) > 50:

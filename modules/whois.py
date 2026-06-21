@@ -314,7 +314,7 @@ def run_whois(domain: str) -> dict:
             return {"error": "Invalid domain: empty after stripping"}
 
         # --- WHOIS via python-whois (gets registry-level data) ---
-        whois_result = whois.whois(clean)
+        whois_result = whois.whois(clean, quiet=True, ignore_socket_errors=True)
 
         registrar = _safe_str(getattr(whois_result, "registrar", None))
         created = _safe_date(getattr(whois_result, "creation_date", None))
